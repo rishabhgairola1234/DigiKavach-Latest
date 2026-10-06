@@ -1,4 +1,5 @@
-import { GoogleGenerativeAI, SchemaType, type Schema } from "@google/generative-ai";
+import { SchemaType, type Schema } from "@google/generative-ai";
+import { generateJson } from "@/lib/llm";
 
 export type ChatMessage = { role: "assistant" | "user"; content: string };
 
@@ -83,38 +84,22 @@ function formatTranscript(history: ChatMessage[]): string {
  * offer a way to switch to the regular form, never leave the civilian stuck.
  */
 export async function runChatIntakeTurn(history: ChatMessage[]): Promise<ChatIntakeResult | null> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    console.error("[runChatIntakeTurn] GEMINI_API_KEY is not set.");
-    return null;
-  }
+  const parsed = await generateJson<{
+    assistant_message: string;
+    ready_to_summarize: boolean;
+    summary: ChatIntakeSummary | null;
+  }>({
+    label: "runChatIntakeTurn",
+    system: buildSystemInstruction(),
+    prompt: `CONVERSATION SO FAR:\n${formatTranscript(history)}\n\nRespond with your next message as the ASSISTANT.`,
+    schema: chatIntakeSchema,
+  });
 
-  try {
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({
-      model: "gemini-3.6-flash",
-      systemInstruction: buildSystemInstruction(),
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: chatIntakeSchema,
-      },
-    });
+  if (!parsed || typeof parsed.assistant_message !== "string") return null;
 
-    const prompt = `CONVERSATION SO FAR:\n${formatTranscript(history)}\n\nRespond with your next message as the ASSISTANT.`;
-    const result = await model.generateContent(prompt);
-    const parsed = JSON.parse(result.response.text()) as {
-      assistant_message: string;
-      ready_to_summarize: boolean;
-      summary: ChatIntakeSummary | null;
-    };
-
-    return {
-      assistantMessage: parsed.assistant_message,
-      readyToSummarize: parsed.ready_to_summarize,
-      summary: parsed.summary,
-    };
-  } catch (err) {
-    console.error("[runChatIntakeTurn] Gemini call failed:", err);
-    return null;
-  }
+  return {
+    assistantMessage: parsed.assistant_message,
+    readyToSummarize: parsed.ready_to_summarize === true,
+    summary: parsed.summary ?? null,
+  };
 }

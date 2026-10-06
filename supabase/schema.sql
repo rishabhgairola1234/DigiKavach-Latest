@@ -720,3 +720,139 @@ create trigger assign_officer_to_complaint
   for each row
   when (new.extracted_data is distinct from old.extracted_data)
   execute procedure public.assign_officer_to_complaint();
+
+
+-- ============================================================================
+-- Step 17: phone number extraction + cross-case phone matching
+-- ============================================================================
+
+-- extracted_data.phone_numbers is just another array inside the existing
+-- jsonb column (Step 5) -- no new column needed, same as adding
+-- original_language/original_description in Step 10.
+
+-- Full redefinition of the Step 9 trigger function, since CREATE OR REPLACE
+-- FUNCTION requires the whole body -- this is the exact same vehicle-plate
+-- and person-name matching as before, plus a new phone-number block using
+-- the same normalize-then-compare approach (digits only, minimum length to
+-- avoid weak/partial-read false positives).
+create or replace function public.link_related_complaints()
+returns trigger
+language plpgsql
+security definer set search_path = public
+as $$
+declare
+  vehicle jsonb;
+  plate text;
+  person jsonb;
+  person_name text;
+  phone_entry jsonb;
+  phone_digits text;
+  other record;
+begin
+  if new.extracted_data is null then
+    return new;
+  end if;
+
+  -- Vehicle plate matches. Plates are normalized (uppercased, punctuation and
+  -- spaces stripped) before comparing, so "KA01 AB1234" and "ka-01-ab-1234"
+  -- still match. Anything shorter than 4 characters after normalizing is too
+  -- weak a signal to bother with (partial reads, placeholders, etc).
+  for vehicle in select * from jsonb_array_elements(coalesce(new.extracted_data->'vehicles', '[]'::jsonb))
+  loop
+    plate := upper(regexp_replace(coalesce(vehicle->>'plate_number', ''), '[^a-zA-Z0-9]', '', 'g'));
+    if length(plate) < 4 then
+      continue;
+    end if;
+
+    for other in
+      select distinct c.id
+      from public.complaints c, jsonb_array_elements(coalesce(c.extracted_data->'vehicles', '[]'::jsonb)) v
+      where c.id <> new.id
+        and c.civilian_id <> new.civilian_id
+        and c.extracted_data is not null
+        and upper(regexp_replace(coalesce(v->>'plate_number', ''), '[^a-zA-Z0-9]', '', 'g')) = plate
+    loop
+      insert into public.complaint_links (complaint_id_a, complaint_id_b, matched_on)
+      values (least(new.id, other.id), greatest(new.id, other.id), 'vehicle_plate: ' || plate)
+      on conflict do nothing;
+    end loop;
+  end loop;
+
+  -- Person name matches -- only full names (first + last, at least 5
+  -- characters) count as "reasonably specific". A single first name like
+  -- "Ramesh" is far too common to treat two mentions of it as related cases.
+  for person in select * from jsonb_array_elements(coalesce(new.extracted_data->'people', '[]'::jsonb))
+  loop
+    person_name := lower(trim(coalesce(person->>'name', '')));
+    if person_name = '' or position(' ' in person_name) = 0 or length(person_name) < 5 then
+      continue;
+    end if;
+
+    for other in
+      select distinct c.id
+      from public.complaints c, jsonb_array_elements(coalesce(c.extracted_data->'people', '[]'::jsonb)) p
+      where c.id <> new.id
+        and c.civilian_id <> new.civilian_id
+        and c.extracted_data is not null
+        and lower(trim(coalesce(p->>'name', ''))) = person_name
+    loop
+      insert into public.complaint_links (complaint_id_a, complaint_id_b, matched_on)
+      values (least(new.id, other.id), greatest(new.id, other.id), 'person_name: ' || initcap(person_name))
+      on conflict do nothing;
+    end loop;
+  end loop;
+
+  -- Phone number matches. Numbers are normalized (digits only) before
+  -- comparing, so "98765-43210", "+91 98765 43210", and "9876543210" all
+  -- match. Anything shorter than 7 digits after normalizing is too weak a
+  -- signal to bother with (partial reads, short codes, etc).
+  for phone_entry in select * from jsonb_array_elements(coalesce(new.extracted_data->'phone_numbers', '[]'::jsonb))
+  loop
+    phone_digits := regexp_replace(coalesce(phone_entry->>'number', ''), '[^0-9]', '', 'g');
+    if length(phone_digits) < 7 then
+      continue;
+    end if;
+
+    for other in
+      select distinct c.id
+      from public.complaints c, jsonb_array_elements(coalesce(c.extracted_data->'phone_numbers', '[]'::jsonb)) ph
+      where c.id <> new.id
+        and c.civilian_id <> new.civilian_id
+        and c.extracted_data is not null
+        and regexp_replace(coalesce(ph->>'number', ''), '[^0-9]', '', 'g') = phone_digits
+    loop
+      insert into public.complaint_links (complaint_id_a, complaint_id_b, matched_on)
+      values (least(new.id, other.id), greatest(new.id, other.id), 'phone: ' || phone_digits)
+      on conflict do nothing;
+    end loop;
+  end loop;
+
+  return new;
+end;
+$$;
+
+-- The trigger itself (name, timing, WHEN clause) is unchanged from Step 9 --
+-- only the function body changed -- but re-running this is harmless and
+-- keeps this step fully self-contained/idempotent on its own.
+drop trigger if exists link_related_complaints on public.complaints;
+create trigger link_related_complaints
+  after update on public.complaints
+  for each row
+  when (new.extracted_data is distinct from old.extracted_data)
+  execute procedure public.link_related_complaints();
+
+
+-- ============================================================================
+-- Step 18: resolved geocoder place name
+-- ============================================================================
+
+-- Nominatim's own display_name for whatever latitude/longitude it resolved
+-- this complaint's free-text location to (src/lib/geocoding.ts), stored
+-- alongside lat/lng so an officer can see what the text actually resolved
+-- to without a second geocoding call. Null whenever latitude/longitude are
+-- null (geocoding failed or hasn't run). No new grant needed: the existing
+-- table-level `grant select, insert on public.complaints to authenticated`
+-- (Step 4) already covers inserting/reading this column, and it's already
+-- readable by officers under the Step 6 "Officers can view all complaints"
+-- policy.
+alter table public.complaints add column if not exists resolved_location_name text;

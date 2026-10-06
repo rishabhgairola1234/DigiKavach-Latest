@@ -31,9 +31,18 @@ yarn-error.log*
 .pnpm-debug.log*
 dev-out.log
 dev-err.log
+*.log
+
+# temp/scratch files
+*.tmp
+_tmp_*
 
 # env files (can opt-in for committing if needed)
 .env*
+
+# local MCP server config -- may contain personal access tokens (e.g. the
+# Supabase management token); never meant to be shared via the repo
+.mcp.json
 
 # vercel
 .vercel

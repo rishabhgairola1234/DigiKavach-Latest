@@ -1,4 +1,4 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { generateText } from "@/lib/llm";
 import { CATEGORY_LABEL, type ComplaintCategory, type ExtractedComplaintData } from "@/lib/complaints";
 
 export type FirContext = {
@@ -79,24 +79,9 @@ function formatFirContext(context: FirContext): string {
  * crash, and must never treat this as anything more than an editable draft.
  */
 export async function generateFirDraft(context: FirContext): Promise<string | null> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    console.error("[generateFirDraft] GEMINI_API_KEY is not set — skipping.");
-    return null;
-  }
-
-  try {
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({
-      model: "gemini-3.6-flash",
-      systemInstruction: SYSTEM_INSTRUCTION,
-    });
-
-    const prompt = `CASE DATA\n${formatFirContext(context)}\n\nDraft the FIR now.`;
-    const result = await model.generateContent(prompt);
-    return result.response.text().trim();
-  } catch (err) {
-    console.error("[generateFirDraft] Gemini call failed:", err);
-    return null;
-  }
+  return generateText({
+    label: "generateFirDraft",
+    system: SYSTEM_INSTRUCTION,
+    prompt: `CASE DATA\n${formatFirContext(context)}\n\nDraft the FIR now.`,
+  });
 }

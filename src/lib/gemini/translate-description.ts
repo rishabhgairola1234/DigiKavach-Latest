@@ -1,4 +1,5 @@
-import { GoogleGenerativeAI, SchemaType, type Schema } from "@google/generative-ai";
+import { SchemaType, type Schema } from "@google/generative-ai";
+import { generateJson } from "@/lib/llm";
 
 export type TranslationResult =
   | { isEnglish: true }
@@ -38,38 +39,22 @@ JSON matching the given schema only.`;
 export async function detectAndTranslateDescription(
   text: string
 ): Promise<TranslationResult | null> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    console.error("[detectAndTranslateDescription] GEMINI_API_KEY is not set — skipping.");
-    return null;
+  const parsed = await generateJson<{
+    is_english: boolean;
+    language: string | null;
+    translated_text: string | null;
+  }>({
+    label: "detectAndTranslateDescription",
+    system: SYSTEM_INSTRUCTION,
+    prompt: text,
+    schema: translationSchema,
+  });
+
+  if (!parsed) return null;
+
+  if (parsed.is_english || !parsed.language || !parsed.translated_text) {
+    return { isEnglish: true };
   }
 
-  try {
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({
-      model: "gemini-3.6-flash",
-      systemInstruction: SYSTEM_INSTRUCTION,
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: translationSchema,
-      },
-    });
-
-    const result = await model.generateContent(text);
-    const raw = result.response.text();
-    const parsed = JSON.parse(raw) as {
-      is_english: boolean;
-      language: string | null;
-      translated_text: string | null;
-    };
-
-    if (parsed.is_english || !parsed.language || !parsed.translated_text) {
-      return { isEnglish: true };
-    }
-
-    return { isEnglish: false, language: parsed.language, translatedText: parsed.translated_text };
-  } catch (err) {
-    console.error("[detectAndTranslateDescription] Gemini call failed:", err);
-    return null;
-  }
+  return { isEnglish: false, language: parsed.language, translatedText: parsed.translated_text };
 }

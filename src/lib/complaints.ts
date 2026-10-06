@@ -44,6 +44,7 @@ export type ComplaintPriority = "low" | "medium" | "high";
 
 export type ExtractedPerson = { name: string | null; description: string };
 export type ExtractedVehicle = { type: string; plate_number: string | null };
+export type ExtractedPhoneNumber = { number: string; associated_with: string | null };
 
 // Structured data Gemini extracts from a complaint's title + description.
 // Stored as-is in complaints.extracted_data (jsonb); null if extraction
@@ -51,6 +52,7 @@ export type ExtractedVehicle = { type: string; plate_number: string | null };
 export type ExtractedComplaintData = {
   people: ExtractedPerson[];
   vehicles: ExtractedVehicle[];
+  phone_numbers: ExtractedPhoneNumber[];
   locations: string[];
   times: string[];
   category: ComplaintCategory;

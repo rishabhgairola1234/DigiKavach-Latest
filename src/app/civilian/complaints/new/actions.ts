@@ -93,6 +93,7 @@ export async function fileComplaint(
       location,
       latitude: geocoded?.latitude ?? null,
       longitude: geocoded?.longitude ?? null,
+      resolved_location_name: geocoded?.displayName ?? null,
     })
     .select("id")
     .single();

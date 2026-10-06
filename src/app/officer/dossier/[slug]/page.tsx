@@ -62,6 +62,23 @@ export default async function DossierPage({
           });
         }
       }
+    } else if (entity.type === "phone") {
+      // Same reasoning as the case detail page: phone_numbers didn't exist
+      // in extracted_data before this field was added, so older complaints
+      // (which this loop runs over regardless of their own age) have it as
+      // undefined rather than an empty array.
+      for (const phone of extracted.phone_numbers ?? []) {
+        if (normalizedValueForEntity({ type: "phone", value: phone.number }) === normalizedValue) {
+          entries.push({
+            complaintId: complaint.id,
+            title: complaint.title,
+            incidentDatetime: complaint.incident_datetime,
+            location: complaint.location,
+            createdAt: complaint.created_at,
+            role: phone.associated_with || "Mentioned",
+          });
+        }
+      }
     } else {
       for (const person of extracted.people) {
         if (!person.name) continue;

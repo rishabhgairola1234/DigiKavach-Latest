@@ -45,7 +45,7 @@ export default async function CaseSearchPage() {
               hiClassName="ml-1.5 text-sm font-normal text-muted"
             />
             <p className="text-sm text-muted">
-              Describe what you&apos;re looking for in plain language — Gemini scans every
+              Describe what you&apos;re looking for in plain language — AI scans every
               case&apos;s title and extracted details for genuine matches.
             </p>
           </div>

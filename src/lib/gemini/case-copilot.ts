@@ -1,4 +1,4 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { generateText } from "@/lib/llm";
 import type { ComplaintStatus, ExtractedComplaintData } from "@/lib/complaints";
 import { COMPLAINT_STATUS_LABEL, CATEGORY_LABEL, PRIORITY_LABEL } from "@/lib/complaints";
 
@@ -70,24 +70,9 @@ export async function askCaseCopilot(
   context: CaseContext,
   question: string
 ): Promise<string | null> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    console.error("[askCaseCopilot] GEMINI_API_KEY is not set — skipping.");
-    return null;
-  }
-
-  try {
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({
-      model: "gemini-3.6-flash",
-      systemInstruction: SYSTEM_INSTRUCTION,
-    });
-
-    const prompt = `CASE DATA\n${formatCaseContext(context)}\n\nOFFICER QUESTION: ${question}`;
-    const result = await model.generateContent(prompt);
-    return result.response.text().trim();
-  } catch (err) {
-    console.error("[askCaseCopilot] Gemini call failed:", err);
-    return null;
-  }
+  return generateText({
+    label: "askCaseCopilot",
+    system: SYSTEM_INSTRUCTION,
+    prompt: `CASE DATA\n${formatCaseContext(context)}\n\nOFFICER QUESTION: ${question}`,
+  });
 }

@@ -1,4 +1,5 @@
-import { GoogleGenerativeAI, SchemaType, type Schema } from "@google/generative-ai";
+import { SchemaType, type Schema } from "@google/generative-ai";
+import { generateJson } from "@/lib/llm";
 import { CATEGORY_LABEL, type ExtractedComplaintData } from "@/lib/complaints";
 
 export type SearchableCase = {
@@ -68,35 +69,16 @@ export async function searchCases(
   query: string,
   cases: SearchableCase[]
 ): Promise<CaseSearchMatch[] | null> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    console.error("[searchCases] GEMINI_API_KEY is not set.");
-    return null;
-  }
+  const caseList = cases.map(formatCaseSummary).join("\n");
 
-  try {
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({
-      model: "gemini-3.6-flash",
-      systemInstruction: SYSTEM_INSTRUCTION,
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: searchResultsSchema,
-      },
-    });
+  const parsed = await generateJson<{ complaint_id: string; reason: string }[]>({
+    label: "searchCases",
+    system: SYSTEM_INSTRUCTION,
+    prompt: `QUERY: ${query}\n\nCASES:\n${caseList}`,
+    schema: searchResultsSchema,
+  });
 
-    const caseList = cases.map(formatCaseSummary).join("\n");
-    const prompt = `QUERY: ${query}\n\nCASES:\n${caseList}`;
+  if (!Array.isArray(parsed)) return null;
 
-    const result = await model.generateContent(prompt);
-    const parsed = JSON.parse(result.response.text()) as {
-      complaint_id: string;
-      reason: string;
-    }[];
-
-    return parsed.map((r) => ({ complaintId: r.complaint_id, reason: r.reason }));
-  } catch (err) {
-    console.error("[searchCases] Gemini call failed:", err);
-    return null;
-  }
+  return parsed.map((r) => ({ complaintId: r.complaint_id, reason: r.reason }));
 }

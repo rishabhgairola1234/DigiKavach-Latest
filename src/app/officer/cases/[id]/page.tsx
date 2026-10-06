@@ -25,6 +25,7 @@ import {
   CalendarClock,
   Users,
   Car,
+  Phone,
   Clock,
   Tag,
   Paperclip,
@@ -67,7 +68,7 @@ export default async function CaseDetailPage({
   const { data: complaint } = await supabase
     .from("complaints")
     .select(
-      "id, title, description, original_language, original_description, civilian_id, status, incident_datetime, location, extracted_data, assigned_officer_id, created_at"
+      "id, title, description, original_language, original_description, civilian_id, status, incident_datetime, location, resolved_location_name, extracted_data, assigned_officer_id, created_at"
     )
     .eq("id", id)
     .single();
@@ -191,6 +192,11 @@ export default async function CaseDetailPage({
       matchedOn: l.matched_on,
     };
   });
+  // linkedCases has one entry per matched_on reason (shown separately in the
+  // list below), but the badge should count distinct OTHER cases -- a case
+  // sharing both a plate and a phone with the same other case is still only
+  // linked to one other case.
+  const distinctLinkedCaseCount = new Set(linkedCases.map((lc) => lc.id)).size;
 
   const tabs: CaseDetailTab[] = [
     {
@@ -361,6 +367,11 @@ export default async function CaseDetailPage({
                 <span className="inline-flex items-center gap-1.5">
                   <MapPin className="h-4 w-4" />
                   {complaint.location}
+                  {complaint.resolved_location_name && (
+                    <span className="text-muted/70">
+                      (resolved to: {complaint.resolved_location_name})
+                    </span>
+                  )}
                 </span>
                 {extractedData && (
                   <span className="inline-flex items-center gap-1.5">
@@ -372,7 +383,7 @@ export default async function CaseDetailPage({
             </div>
             <div className="flex shrink-0 items-center gap-2">
               {overdue && <OverdueBadge />}
-              <LinkedCasesBadge count={linkedCases.length} />
+              <LinkedCasesBadge count={distinctLinkedCaseCount} />
               <PriorityBadge priority={extractedData?.priority} bilingual />
               <StatusBadge status={status} bilingual />
             </div>
@@ -463,6 +474,30 @@ export default async function CaseDetailPage({
                           <span className="font-medium">{v.type}</span>
                           {v.plate_number && (
                             <span className="text-muted"> — {v.plate_number}</span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </EntityPanel>
+
+                <EntityPanel icon={Phone} title="Phone Numbers" titleHi="फ़ोन नंबर">
+                  {/* phone_numbers is the only newly-added field here -- older
+                      cases extracted before it existed have no such key at
+                      all in their stored extracted_data, so it reads back as
+                      undefined rather than an empty array. people/vehicles/
+                      locations/times have existed since the first extraction
+                      version, so no case predates them and they don't need
+                      this same fallback. */}
+                  {(extractedData.phone_numbers ?? []).length === 0 ? (
+                    <EmptyEntity />
+                  ) : (
+                    <ul className="flex flex-col gap-1.5">
+                      {(extractedData.phone_numbers ?? []).map((p, i) => (
+                        <li key={i} className="text-sm text-foreground">
+                          <span className="font-medium">{p.number}</span>
+                          {p.associated_with && (
+                            <span className="text-muted"> — {p.associated_with}</span>
                           )}
                         </li>
                       ))}

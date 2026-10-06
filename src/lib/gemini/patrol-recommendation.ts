@@ -1,4 +1,4 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { generateText } from "@/lib/llm";
 import { CATEGORY_LABEL, type ComplaintCategory } from "@/lib/complaints";
 
 export type PatrolRecommendationContext = {
@@ -42,24 +42,9 @@ function formatContext(context: PatrolRecommendationContext): string {
 export async function generatePatrolRecommendation(
   context: PatrolRecommendationContext
 ): Promise<string | null> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    console.error("[generatePatrolRecommendation] GEMINI_API_KEY is not set.");
-    return null;
-  }
-
-  try {
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({
-      model: "gemini-3.6-flash",
-      systemInstruction: SYSTEM_INSTRUCTION,
-    });
-
-    const prompt = `CLUSTER DATA\n${formatContext(context)}\n\nWrite the recommendation now.`;
-    const result = await model.generateContent(prompt);
-    return result.response.text().trim();
-  } catch (err) {
-    console.error("[generatePatrolRecommendation] Gemini call failed:", err);
-    return null;
-  }
+  return generateText({
+    label: "generatePatrolRecommendation",
+    system: SYSTEM_INSTRUCTION,
+    prompt: `CLUSTER DATA\n${formatContext(context)}\n\nWrite the recommendation now.`,
+  });
 }

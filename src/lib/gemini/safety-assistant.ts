@@ -1,4 +1,5 @@
-import { GoogleGenerativeAI, SchemaType, type Schema } from "@google/generative-ai";
+import { SchemaType, type Schema } from "@google/generative-ai";
+import { generateJson } from "@/lib/llm";
 
 export type SafetyChatMessage = { role: "assistant" | "user"; content: string };
 
@@ -69,36 +70,17 @@ function formatTranscript(history: SafetyChatMessage[]): string {
 export async function runSafetyAssistantTurn(
   history: SafetyChatMessage[]
 ): Promise<SafetyAssistantResult | null> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    console.error("[runSafetyAssistantTurn] GEMINI_API_KEY is not set.");
-    return null;
-  }
+  const parsed = await generateJson<{ is_immediate_danger: boolean; assistant_message: string }>({
+    label: "runSafetyAssistantTurn",
+    system: SYSTEM_INSTRUCTION,
+    prompt: `CONVERSATION SO FAR:\n${formatTranscript(history)}\n\nRespond to the civilian's latest message.`,
+    schema: safetyAssistantSchema,
+  });
 
-  try {
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({
-      model: "gemini-3.6-flash",
-      systemInstruction: SYSTEM_INSTRUCTION,
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: safetyAssistantSchema,
-      },
-    });
+  if (!parsed || typeof parsed.assistant_message !== "string") return null;
 
-    const prompt = `CONVERSATION SO FAR:\n${formatTranscript(history)}\n\nRespond to the civilian's latest message.`;
-    const result = await model.generateContent(prompt);
-    const parsed = JSON.parse(result.response.text()) as {
-      is_immediate_danger: boolean;
-      assistant_message: string;
-    };
-
-    return {
-      isImmediateDanger: parsed.is_immediate_danger,
-      assistantMessage: parsed.assistant_message,
-    };
-  } catch (err) {
-    console.error("[runSafetyAssistantTurn] Gemini call failed:", err);
-    return null;
-  }
+  return {
+    isImmediateDanger: parsed.is_immediate_danger === true,
+    assistantMessage: parsed.assistant_message,
+  };
 }

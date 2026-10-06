@@ -1,6 +1,6 @@
 import { normalizePlate } from "@/lib/plate-matching";
 
-export type EntityType = "vehicle_plate" | "person_name";
+export type EntityType = "vehicle_plate" | "person_name" | "phone";
 
 export type EntityRef = { type: EntityType; value: string };
 
@@ -12,9 +12,16 @@ export function normalizePersonName(name: string): string {
   return name.trim().toLowerCase();
 }
 
-// complaint_links.matched_on is always written by the trigger as either
-// "vehicle_plate: <PLATE>" or "person_name: <name>" -- this is the inverse of
-// that formatting, used to turn a link's reason back into a navigable entity.
+// Mirrors the phone-number normalization used by the same trigger's Step 17
+// phone-matching block: digits only, nothing else.
+export function normalizePhoneNumber(number: string): string {
+  return number.replace(/[^0-9]/g, "");
+}
+
+// complaint_links.matched_on is always written by the trigger as
+// "vehicle_plate: <PLATE>", "person_name: <name>", or "phone: <digits>" --
+// this is the inverse of that formatting, used to turn a link's reason back
+// into a navigable entity.
 export function parseMatchedOn(matchedOn: string): EntityRef | null {
   const separatorIndex = matchedOn.indexOf(": ");
   if (separatorIndex === -1) return null;
@@ -23,7 +30,7 @@ export function parseMatchedOn(matchedOn: string): EntityRef | null {
   const value = matchedOn.slice(separatorIndex + 2).trim();
   if (!value) return null;
 
-  if (type === "vehicle_plate" || type === "person_name") {
+  if (type === "vehicle_plate" || type === "person_name" || type === "phone") {
     return { type, value };
   }
   return null;
@@ -42,21 +49,22 @@ export function decodeEntitySlug(slug: string): EntityRef | null {
   const value = decoded.slice(separatorIndex + 1);
   if (!value) return null;
 
-  if (type === "vehicle_plate" || type === "person_name") {
+  if (type === "vehicle_plate" || type === "person_name" || type === "phone") {
     return { type, value };
   }
   return null;
 }
 
 export function normalizedValueForEntity(entity: EntityRef): string {
-  return entity.type === "vehicle_plate"
-    ? normalizePlate(entity.value)
-    : normalizePersonName(entity.value);
+  if (entity.type === "vehicle_plate") return normalizePlate(entity.value);
+  if (entity.type === "phone") return normalizePhoneNumber(entity.value);
+  return normalizePersonName(entity.value);
 }
 
 export const ENTITY_TYPE_LABEL: Record<EntityType, string> = {
   vehicle_plate: "Vehicle Plate",
   person_name: "Person",
+  phone: "Phone Number",
 };
 
 // Officer-facing bilingual label, same reasoning as COMPLAINT_STATUS_LABEL_HI
@@ -64,6 +72,7 @@ export const ENTITY_TYPE_LABEL: Record<EntityType, string> = {
 export const ENTITY_TYPE_LABEL_HI: Record<EntityType, string> = {
   vehicle_plate: "वाहन नंबर प्लेट",
   person_name: "व्यक्ति",
+  phone: "फ़ोन नंबर",
 };
 
 export type DossierEntry = {

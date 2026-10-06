@@ -1,4 +1,5 @@
-import { GoogleGenerativeAI, SchemaType, type Schema } from "@google/generative-ai";
+import { SchemaType, type Schema } from "@google/generative-ai";
+import { generateJson } from "@/lib/llm";
 import { CATEGORY_LABEL, type ComplaintCategory, type ExtractedComplaintData } from "@/lib/complaints";
 
 export type NextStepsContext = {
@@ -68,27 +69,12 @@ function formatContext(context: NextStepsContext): string {
  * (same reasoning as FIR draft / evidence sufficiency).
  */
 export async function suggestNextSteps(context: NextStepsContext): Promise<string[] | null> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    console.error("[suggestNextSteps] GEMINI_API_KEY is not set.");
-    return null;
-  }
+  const parsed = await generateJson<string[]>({
+    label: "suggestNextSteps",
+    system: SYSTEM_INSTRUCTION,
+    prompt: formatContext(context),
+    schema: nextStepsSchema,
+  });
 
-  try {
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({
-      model: "gemini-3.6-flash",
-      systemInstruction: SYSTEM_INSTRUCTION,
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: nextStepsSchema,
-      },
-    });
-
-    const result = await model.generateContent(formatContext(context));
-    return JSON.parse(result.response.text()) as string[];
-  } catch (err) {
-    console.error("[suggestNextSteps] Gemini call failed:", err);
-    return null;
-  }
+  return Array.isArray(parsed) ? parsed : null;
 }

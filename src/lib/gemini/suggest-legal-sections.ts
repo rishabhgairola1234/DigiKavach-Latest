@@ -1,4 +1,5 @@
-import { GoogleGenerativeAI, SchemaType, type Schema } from "@google/generative-ai";
+import { SchemaType, type Schema } from "@google/generative-ai";
+import { generateJson } from "@/lib/llm";
 import { CATEGORY_LABEL, type ComplaintCategory, type ExtractedComplaintData } from "@/lib/complaints";
 
 export type SuggestedLegalSection = {
@@ -16,7 +17,10 @@ const legalSectionsSchema: Schema = {
       section: {
         type: SchemaType.STRING,
         description:
-          "Exactly in the form 'BNS Section <number>' or 'IPC Section <number>' -- no other wording, no year, no spelled-out act name. Prefer BNS; use IPC only if you are not confident of the BNS mapping.",
+          "The current BNS or BNSS section, e.g. 'BNS Section 304' or 'BNSS Section 173'. Never cite IPC/CrPC " +
+          "as the primary citation. Optionally append the old IPC/CrPC equivalent in brackets if you're " +
+          "confident of the mapping, e.g. 'BNS Section 304 (IPC Section 379)' -- omit the brackets entirely " +
+          "if unsure of the old equivalent rather than guessing. No other wording, no year, no spelled-out act name.",
       },
       title: {
         type: SchemaType.STRING,
@@ -32,13 +36,25 @@ const legalSectionsSchema: Schema = {
 };
 
 const SYSTEM_INSTRUCTION = `You suggest likely applicable Indian criminal law sections for a police case,
-as a reference starting point for the investigating officer -- this is not a legal determination. Prefer
-sections from the Bharatiya Nyaya Sanhita (BNS), the code that replaced the Indian Penal Code (IPC) in
-2024. Cite an IPC section instead only if you are not confident of the correct BNS mapping. Suggest 1 to 3
-of the MOST relevant sections based on the case's category, description, and extracted details -- do not
-pad the list with weak or generic matches. Always format the "section" field exactly as "BNS Section
-<number>" or "IPC Section <number>" -- nothing else, no act name, no year. Respond with JSON matching the
-given schema only.`;
+as a reference starting point for the investigating officer -- this is not a legal determination. Cite
+only from the Bharatiya Nyaya Sanhita (BNS, 2023), which replaced the Indian Penal Code (IPC) with effect
+from 1 July 2024, and the Bharatiya Nagarik Suraksha Sanhita (BNSS), which replaced the Code of Criminal
+Procedure (CrPC), for any procedural section. Never cite the IPC or CrPC as the primary citation -- those
+codes are no longer in force. You may optionally add the old IPC/CrPC equivalent in brackets after the BNS/
+BNSS citation if you are genuinely confident of the mapping (e.g. "BNS Section 304 (IPC Section 379)"); if
+you aren't confident of the old equivalent, just omit the brackets rather than guessing.
+
+Be conservative: suggest a section only when the stated facts clearly support every element of that
+offense, not merely a related or adjacent one. In particular, distinguish theft/snatching from robbery --
+snatching a bag or phone is theft/snatching; it only becomes robbery if the facts describe force, hurt,
+wrongful restraint, or a threat used against the person to take the property or escape with it. Don't
+escalate to the more serious offense without that explicit support in the text. Apply the same discipline
+to every other category (e.g. simple hurt vs. grievous hurt, criminal intimidation vs. assault) -- when in
+doubt, prefer the lesser offense that is actually supported by the facts, or omit the section rather than
+pad the list with a weak or generic match.
+
+Suggest 1 to 3 of the MOST relevant sections based on the case's category, description, and extracted
+details. Respond with JSON matching the given schema only.`;
 
 function formatContext(
   category: ComplaintCategory | null,
@@ -73,28 +89,12 @@ export async function suggestLegalSections(
   description: string,
   extractedData: ExtractedComplaintData | null
 ): Promise<SuggestedLegalSection[] | null> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    console.error("[suggestLegalSections] GEMINI_API_KEY is not set — skipping.");
-    return null;
-  }
+  const parsed = await generateJson<SuggestedLegalSection[]>({
+    label: "suggestLegalSections",
+    system: SYSTEM_INSTRUCTION,
+    prompt: formatContext(category, description, extractedData),
+    schema: legalSectionsSchema,
+  });
 
-  try {
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({
-      model: "gemini-3.6-flash",
-      systemInstruction: SYSTEM_INSTRUCTION,
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: legalSectionsSchema,
-      },
-    });
-
-    const result = await model.generateContent(formatContext(category, description, extractedData));
-    const parsed = JSON.parse(result.response.text()) as SuggestedLegalSection[];
-    return parsed.length ? parsed : null;
-  } catch (err) {
-    console.error("[suggestLegalSections] Gemini call failed:", err);
-    return null;
-  }
+  return Array.isArray(parsed) && parsed.length ? parsed : null;
 }

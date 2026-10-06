@@ -17,7 +17,7 @@ export function SosButton() {
 
     if (!("geolocation" in navigator)) {
       setError(
-        "Your browser doesn't support location sharing. Please call emergency services directly."
+        "Your SOS alert could not be sent because your browser doesn't support location sharing. Please call emergency services directly."
       );
       setState("error");
       return;
@@ -40,8 +40,8 @@ export function SosButton() {
       (geoError) => {
         setError(
           geoError.code === geoError.PERMISSION_DENIED
-            ? "Location access was denied. Please enable location permissions and try again, or call emergency services directly."
-            : "Couldn't get your location. Please try again or call emergency services directly."
+            ? "Your SOS alert could not be sent because location access was denied. Please enable location permissions and try again, or call emergency services directly."
+            : "Your SOS alert could not be sent because your location couldn't be determined. Please try again or call emergency services directly."
         );
         setState("error");
       },

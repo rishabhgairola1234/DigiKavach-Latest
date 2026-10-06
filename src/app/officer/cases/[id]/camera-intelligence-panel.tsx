@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Camera, Video, Square, Loader2, AlertTriangle, X } from "lucide-react";
+import { Camera, Video, Square, Loader2, AlertTriangle, X, Sparkles } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { formatRelativeTime } from "@/lib/time";
 import { motionLevelForIntensity, type MotionLevel } from "@/lib/motion-detection";
@@ -14,7 +14,7 @@ import {
   type MotionReading,
   type KeyMoment,
 } from "./camera-actions";
-import { findCaseByPlate } from "./plate-actions";
+import { findCaseByPlate, readPlateWithAI } from "./plate-actions";
 import { Bilingual } from "@/components/bilingual";
 import { useIsCaseTabActive } from "./case-detail-tabs";
 
@@ -60,11 +60,26 @@ const CAMERA_CONSTRAINTS: MediaStreamConstraints = {
 };
 
 // Plate OCR is the most expensive per-tick operation here, so it runs far
-// less often than detection/motion -- every 2.5s, on a small downscaled
-// frame, with a re-entrancy guard so a slow pass never overlaps the next.
+// less often than detection/motion -- every 2.5s, with a re-entrancy guard
+// so a slow pass never overlaps the next.
 const OCR_INTERVAL_MS = 2500;
-const OCR_SAMPLE_WIDTH = 480;
-const OCR_SAMPLE_HEIGHT = 360;
+
+// Only these coco-ssd classes are worth cropping for a plate -- OCR runs
+// against the most recent detections from runDetectionLoop rather than the
+// whole frame, and skips the tick entirely if none of these are in view.
+const VEHICLE_CLASSES = new Set(["car", "motorcycle", "bus", "truck"]);
+const PLATE_CROP_PADDING_RATIO = 0.1;
+const PLATE_CROP_MIN_WIDTH = 640;
+const PLATE_CONTRAST_FACTOR = 1.6;
+
+// On-demand "Read plate with AI" button -- a separate, officer-triggered
+// vision-LLM read, distinct from the continuous background OCR loop above.
+// Downscales (not upscales) since this goes over the network as a JPEG,
+// and keeps the original color frame rather than the OCR loop's grayscale
+// preprocessing, which a vision model doesn't need.
+const AI_PLATE_MAX_WIDTH = 1024;
+const AI_PLATE_JPEG_QUALITY = 0.8;
+const AI_PLATE_CLICK_COOLDOWN_MS = 3000;
 
 // Key-moment thumbnails: small + compressed, and rate-limited so a burst of
 // motion or several new object classes in quick succession can't flood
@@ -93,11 +108,23 @@ export function CameraIntelligencePanel({
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [motionLevel, setMotionLevel] = useState<MotionLevel>("none");
   const [plateMatch, setPlateMatch] = useState<PlateMatch | null>(null);
+  const [hasVehicleInView, setHasVehicleInView] = useState(false);
+  const [ocrReadText, setOcrReadText] = useState<string | null>(null);
+  const [testMode, setTestMode] = useState(false);
+  // Mirrors `testMode` for runOcrLoop to read -- that function is handed to
+  // window.setInterval once in startOcrInterval(), so it keeps the closure
+  // from whenever the interval was created; a ref always reads the current
+  // value instead of a stale one.
+  const testModeRef = useRef(false);
+  const [aiPlateLoading, setAiPlateLoading] = useState(false);
+  const [aiPlateStatus, setAiPlateStatus] = useState<string | null>(null);
+  const lastAiPlateClickRef = useRef(0);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const offscreenRef = useRef<HTMLCanvasElement | null>(null);
-  const ocrCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const plateCropCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const aiPlateCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const thumbnailCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const modelRef = useRef<CocoSsdModel | null>(null);
@@ -115,6 +142,7 @@ export function CameraIntelligencePanel({
   const chunksRef = useRef<Blob[]>([]);
 
   const labeledPredictionsRef = useRef<LabeledPrediction[]>([]);
+  const latestDetectionsRef = useRef<Detection[]>([]);
   const prevFrameRef = useRef<Uint8ClampedArray | null>(null);
   const motionLevelRef = useRef<MotionLevel>("none");
   const wasHighMotionRef = useRef(false);
@@ -140,6 +168,10 @@ export function CameraIntelligencePanel({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    testModeRef.current = testMode;
+  }, [testMode]);
 
   // Pauses/resumes just the OCR polling (not the camera stream, detection,
   // motion tracking, or an in-progress recording -- none of those have a
@@ -275,6 +307,8 @@ export function CameraIntelligencePanel({
 
     try {
       const predictions = await model.detect(video);
+      latestDetectionsRef.current = predictions;
+      setHasVehicleInView(predictions.some((p) => VEHICLE_CLASSES.has(p.class)));
 
       const ctx = canvasRef.current?.getContext("2d");
       if (ctx) ctx.font = BOX_LABEL_FONT;
@@ -356,37 +390,189 @@ export function CameraIntelligencePanel({
     prevFrameRef.current = frame;
   }
 
+  // Crops+upscales one vehicle's bounding box (with padding) from the
+  // full-resolution video frame onto `plateCropCanvasRef`, converts it to
+  // high-contrast grayscale, and returns it ready for worker.recognize().
+  // Returns null if the box has no usable area (fully clamped out of frame).
+  function preparePlateCrop(video: HTMLVideoElement, bbox: [number, number, number, number]) {
+    const [x, y, w, h] = bbox;
+    const padX = w * PLATE_CROP_PADDING_RATIO;
+    const padY = h * PLATE_CROP_PADDING_RATIO;
+
+    const cropX = Math.max(0, x - padX);
+    const cropY = Math.max(0, y - padY);
+    const cropW = Math.min(video.videoWidth - cropX, w + padX * 2);
+    const cropH = Math.min(video.videoHeight - cropY, h + padY * 2);
+    if (cropW <= 0 || cropH <= 0) return null;
+
+    const scale = Math.max(1, PLATE_CROP_MIN_WIDTH / cropW);
+    const targetWidth = Math.round(cropW * scale);
+    const targetHeight = Math.round(cropH * scale);
+
+    if (!plateCropCanvasRef.current) {
+      plateCropCanvasRef.current = document.createElement("canvas");
+    }
+    const cropCanvas = plateCropCanvasRef.current;
+    const cctx = cropCanvas.getContext("2d");
+    if (!cctx) return null;
+
+    cropCanvas.width = targetWidth;
+    cropCanvas.height = targetHeight;
+    cctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, targetWidth, targetHeight);
+
+    // Grayscale + contrast boost -- small, low-contrast plate text is what
+    // trips up OCR most, so give Tesseract a cleaner crop than raw color.
+    const imageData = cctx.getImageData(0, 0, targetWidth, targetHeight);
+    const data = imageData.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      const contrasted = Math.min(255, Math.max(0, (gray - 128) * PLATE_CONTRAST_FACTOR + 128));
+      data[i] = contrasted;
+      data[i + 1] = contrasted;
+      data[i + 2] = contrasted;
+    }
+    cctx.putImageData(imageData, 0, 0);
+
+    return cropCanvas;
+  }
+
+  // Crops to `bbox` (no padding, unlike preparePlateCrop) and downscales --
+  // never upscales -- to at most AI_PLATE_MAX_WIDTH, keeping the original
+  // color frame, then encodes as a JPEG data URL for the AI plate-read
+  // server action. Returns null if the box has no usable area.
+  function captureFrameForAI(video: HTMLVideoElement, bbox: [number, number, number, number]): string | null {
+    const [x, y, w, h] = bbox;
+    const cropX = Math.max(0, x);
+    const cropY = Math.max(0, y);
+    const cropW = Math.min(video.videoWidth - cropX, w);
+    const cropH = Math.min(video.videoHeight - cropY, h);
+    if (cropW <= 0 || cropH <= 0) return null;
+
+    const scale = Math.min(1, AI_PLATE_MAX_WIDTH / cropW);
+    const targetWidth = Math.round(cropW * scale);
+    const targetHeight = Math.round(cropH * scale);
+
+    if (!aiPlateCanvasRef.current) {
+      aiPlateCanvasRef.current = document.createElement("canvas");
+    }
+    const canvas = aiPlateCanvasRef.current;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+    ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, targetWidth, targetHeight);
+
+    return canvas.toDataURL("image/jpeg", AI_PLATE_JPEG_QUALITY);
+  }
+
+  async function handleReadPlateWithAI() {
+    const now = Date.now();
+    if (now - lastAiPlateClickRef.current < AI_PLATE_CLICK_COOLDOWN_MS) return;
+    lastAiPlateClickRef.current = now;
+
+    const video = videoRef.current;
+    if (!video || video.readyState < 2) return;
+
+    setAiPlateLoading(true);
+    setAiPlateStatus(null);
+    setErrorMessage(null);
+
+    try {
+      // Crop to the largest vehicle currently in view (by box area), or the
+      // full frame if none is in view.
+      const vehicleDetections = latestDetectionsRef.current.filter((d) =>
+        VEHICLE_CLASSES.has(d.class)
+      );
+      const largestVehicle = vehicleDetections.reduce<Detection | null>((largest, d) => {
+        const area = d.bbox[2] * d.bbox[3];
+        const largestArea = largest ? largest.bbox[2] * largest.bbox[3] : -1;
+        return area > largestArea ? d : largest;
+      }, null);
+
+      const bbox: [number, number, number, number] = largestVehicle
+        ? largestVehicle.bbox
+        : [0, 0, video.videoWidth, video.videoHeight];
+
+      const dataUrl = captureFrameForAI(video, bbox);
+      if (!dataUrl) {
+        setErrorMessage("Couldn't capture a frame to read.");
+        return;
+      }
+
+      const result = await readPlateWithAI(dataUrl);
+
+      if (result.error) {
+        setErrorMessage(result.error);
+      } else if (result.match) {
+        setPlateMatch(result.match);
+      } else if (result.plate) {
+        setAiPlateStatus(`AI read: ${result.plate} (no matching case)`);
+      } else {
+        setAiPlateStatus("AI didn't find a plate clearly visible in this frame.");
+      }
+    } catch (err) {
+      console.error("[CameraIntelligence] AI plate read error:", err);
+      setErrorMessage("AI plate reading failed. Please try again.");
+    } finally {
+      setAiPlateLoading(false);
+    }
+  }
+
   async function runOcrLoop() {
     const video = videoRef.current;
     const worker = ocrWorkerRef.current;
     if (!video || !worker || video.readyState < 2 || ocrRunningRef.current) return;
 
+    // No vehicle in the latest detection tick -- normally skip this OCR tick
+    // entirely rather than running OCR over the whole frame, which is both
+    // wasteful and far less accurate than a cropped plate region. Test mode
+    // overrides this for demo purposes: when no vehicle is in view, it reads
+    // the whole frame through the same crop/grayscale/contrast/upscale
+    // pipeline instead of skipping (preparePlateCrop clamps a [0, 0,
+    // videoWidth, videoHeight] "crop" to the frame itself, so no padding
+    // ever extends past its edges).
+    const vehicleDetections = latestDetectionsRef.current.filter((d) =>
+      VEHICLE_CLASSES.has(d.class)
+    );
+    const regionsToRead: [number, number, number, number][] =
+      vehicleDetections.length > 0
+        ? vehicleDetections.map((d) => d.bbox)
+        : testModeRef.current
+          ? [[0, 0, video.videoWidth, video.videoHeight]]
+          : [];
+    if (regionsToRead.length === 0) return;
+
     ocrRunningRef.current = true;
     try {
-      if (!ocrCanvasRef.current) {
-        ocrCanvasRef.current = document.createElement("canvas");
-        ocrCanvasRef.current.width = OCR_SAMPLE_WIDTH;
-        ocrCanvasRef.current.height = OCR_SAMPLE_HEIGHT;
+      const readTexts: string[] = [];
+      const allCandidates: string[] = [];
+
+      for (const bbox of regionsToRead) {
+        const cropCanvas = preparePlateCrop(video, bbox);
+        if (!cropCanvas) continue;
+
+        const result = await worker.recognize(cropCanvas);
+
+        // The worker may have been torn down (deactivated, unmounted) while
+        // this call was in flight -- discard everything from this tick
+        // rather than acting on a session that's already gone.
+        if (ocrWorkerRef.current !== worker) return;
+
+        const text = result.data.text.trim();
+        if (text) readTexts.push(text);
+        allCandidates.push(
+          ...text
+            .split(/\s+/)
+            .map((t) => t.trim())
+            .filter(Boolean)
+        );
       }
-      const ocrCanvas = ocrCanvasRef.current;
-      const octx = ocrCanvas.getContext("2d");
-      if (!octx) return;
-      octx.drawImage(video, 0, 0, OCR_SAMPLE_WIDTH, OCR_SAMPLE_HEIGHT);
 
-      const result = await worker.recognize(ocrCanvas);
+      setOcrReadText(readTexts.length > 0 ? readTexts.join(" | ") : null);
 
-      // The worker may have been torn down (deactivated, unmounted) while
-      // this call was in flight -- discard a late result rather than acting
-      // on a plate match for a session that's already gone.
-      if (ocrWorkerRef.current !== worker) return;
-
-      const candidates = result.data.text
-        .split(/\s+/)
-        .map((t) => t.trim())
-        .filter(Boolean);
-
-      if (candidates.length > 0) {
-        const match = await findCaseByPlate(candidates);
+      if (allCandidates.length > 0) {
+        const match = await findCaseByPlate(allCandidates);
         if (ocrWorkerRef.current === worker && match) setPlateMatch(match);
       }
     } catch (err) {
@@ -455,6 +641,7 @@ export function CameraIntelligencePanel({
           "continuing without live plate cross-referencing:",
         err
       );
+      setErrorMessage("Plate reading is unavailable. Continuing without live plate cross-referencing.");
     }
 
     setState("requesting-camera");
@@ -487,8 +674,16 @@ export function CameraIntelligencePanel({
   function handleDeactivate() {
     cleanup();
     labeledPredictionsRef.current = [];
+    latestDetectionsRef.current = [];
     setMotionLevel("none");
     setPlateMatch(null);
+    setHasVehicleInView(false);
+    setOcrReadText(null);
+    setTestMode(false);
+    testModeRef.current = false;
+    setAiPlateLoading(false);
+    setAiPlateStatus(null);
+    lastAiPlateClickRef.current = 0;
     setState("idle");
   }
 
@@ -650,6 +845,42 @@ export function CameraIntelligencePanel({
           <div className="overflow-hidden rounded-lg border border-border">
             <canvas ref={canvasRef} className="block w-full" />
           </div>
+
+          <label className="flex items-center gap-2 text-xs text-muted">
+            <input
+              type="checkbox"
+              checked={testMode}
+              onChange={(e) => setTestMode(e.target.checked)}
+              className="h-3.5 w-3.5 rounded border-border accent-accent"
+            />
+            Test mode (read text without a vehicle)
+          </label>
+
+          {(hasVehicleInView || testMode) && ocrReadText && (
+            <div className="pop-in flex items-start gap-2 rounded-lg border border-border bg-background-elevated px-3 py-2 text-xs text-muted">
+              <span className="shrink-0 font-medium text-foreground">OCR read (experimental):</span>
+              <span className="truncate">{ocrReadText}</span>
+            </div>
+          )}
+
+          <div>
+            <button
+              onClick={handleReadPlateWithAI}
+              disabled={aiPlateLoading}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-background-elevated px-3 py-2 text-xs font-medium text-foreground transition-all hover:border-accent/50 active:scale-[0.98] disabled:opacity-50"
+            >
+              {aiPlateLoading ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Sparkles className="h-3.5 w-3.5" />
+              )}
+              {aiPlateLoading ? "Reading plate..." : "Read plate with AI"}
+            </button>
+          </div>
+
+          {aiPlateStatus && (
+            <p className="pop-in text-xs text-muted">{aiPlateStatus}</p>
+          )}
 
           {plateMatch && (
             <div className="pop-in flex items-start gap-2 rounded-lg border border-priority-high/40 bg-priority-high/10 px-3 py-2.5 text-sm text-priority-high">

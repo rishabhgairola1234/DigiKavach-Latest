@@ -66,7 +66,7 @@ export function SearchForm() {
                 hiClassName="block text-xs font-normal text-muted"
               />
               <p className="mt-1 max-w-sm text-xs text-muted">
-                Gemini didn&apos;t find any cases confidently relevant to that query. Try
+                AI didn&apos;t find any cases confidently relevant to that query. Try
                 rephrasing or broadening it.
               </p>
             </div>

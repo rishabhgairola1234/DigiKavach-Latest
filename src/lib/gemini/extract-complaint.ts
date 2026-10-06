@@ -1,4 +1,5 @@
-import { GoogleGenerativeAI, SchemaType, type Schema } from "@google/generative-ai";
+import { SchemaType, type Schema } from "@google/generative-ai";
+import { generateJson } from "@/lib/llm";
 import type { ComplaintCategory, ComplaintPriority, ExtractedComplaintData } from "@/lib/complaints";
 
 const CATEGORIES: ComplaintCategory[] = [
@@ -53,6 +54,27 @@ const extractionSchema: Schema = {
         required: ["type"],
       },
     },
+    phone_numbers: {
+      type: SchemaType.ARRAY,
+      description: "Every phone number mentioned in the complaint.",
+      items: {
+        type: SchemaType.OBJECT,
+        properties: {
+          number: {
+            type: SchemaType.STRING,
+            description: "The phone number as written in the text.",
+          },
+          associated_with: {
+            type: SchemaType.STRING,
+            nullable: true,
+            description:
+              "Who this number belongs to or is associated with, if stated (e.g. 'suspect', " +
+              "'witness', or a person's name).",
+          },
+        },
+        required: ["number"],
+      },
+    },
     locations: {
       type: SchemaType.ARRAY,
       description: "Every place mentioned in the complaint, besides the primary incident location.",
@@ -76,13 +98,15 @@ const extractionSchema: Schema = {
       description: "Urgency implied by the description — e.g. ongoing danger or violence is high.",
     },
   },
-  required: ["people", "vehicles", "locations", "times", "category", "priority"],
+  required: ["people", "vehicles", "phone_numbers", "locations", "times", "category", "priority"],
 };
 
 const SYSTEM_INSTRUCTION = `You are a case intelligence assistant for a police complaint platform.
 Read the complaint title and description and extract structured data for investigators.
-Only include people, vehicles, locations, and times that are explicitly mentioned in the text —
-never invent details. Respond with JSON matching the given schema only.`;
+Only include people, vehicles, phone numbers, locations, and times that are explicitly mentioned in
+the text — never invent details. For phone numbers, capture the number as written and, if the text
+states whose number it is (e.g. "suspect's number: 98XXXXXXXX"), record that association too.
+Respond with JSON matching the given schema only.`;
 
 /**
  * Calls Gemini to extract structured case data from a complaint. Returns null on any
@@ -93,32 +117,23 @@ export async function extractComplaintData(
   title: string,
   description: string
 ): Promise<ExtractedComplaintData | null> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    console.error("[extractComplaintData] GEMINI_API_KEY is not set — skipping AI extraction.");
-    return null;
-  }
+  const parsed = await generateJson<ExtractedComplaintData>({
+    label: "extractComplaintData",
+    system: SYSTEM_INSTRUCTION,
+    prompt: `Complaint title: ${title}\n\nComplaint description: ${description}`,
+    schema: extractionSchema,
+  });
 
-  try {
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({
-      model: "gemini-3.6-flash",
-      systemInstruction: SYSTEM_INSTRUCTION,
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: extractionSchema,
-      },
-    });
+  if (!parsed) return null;
 
-    const result = await model.generateContent(
-      `Complaint title: ${title}\n\nComplaint description: ${description}`
-    );
-
-    const raw = result.response.text();
-    const parsed = JSON.parse(raw) as ExtractedComplaintData;
-    return parsed;
-  } catch (err) {
-    console.error("[extractComplaintData] Gemini extraction failed:", err);
-    return null;
-  }
+  // Other providers don't enforce the schema as strictly as Gemini, so make
+  // sure the arrays downstream code iterates over always exist.
+  return {
+    ...parsed,
+    people: parsed.people ?? [],
+    vehicles: parsed.vehicles ?? [],
+    phone_numbers: parsed.phone_numbers ?? [],
+    locations: parsed.locations ?? [],
+    times: parsed.times ?? [],
+  };
 }

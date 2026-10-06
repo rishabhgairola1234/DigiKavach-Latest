@@ -8,6 +8,7 @@ import { useEffect, useRef } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { CATEGORY_MAP_COLOR, type ComplaintCategory } from "@/lib/complaints";
+import { DEFAULT_CENTER, DEFAULT_ZOOM, isWithinDehradunViewbox } from "@/lib/geo-config";
 
 export type SafetyMapPoint = {
   id: string;
@@ -16,12 +17,6 @@ export type SafetyMapPoint = {
   category: ComplaintCategory | null;
   createdAt: string;
 };
-
-// Bangalore, Karnataka -- used only when there are no points yet, at a
-// city-scale zoom, so the map looks intentional from the first load instead
-// of a generic world view or an empty ocean coordinate.
-const DEFAULT_CENTER: [number, number] = [12.9716, 77.5946];
-const DEFAULT_ZOOM = 12;
 
 // How far in the flyTo animates when a list item is clicked -- close enough
 // to feel like "zooming into this specific incident".
@@ -58,27 +53,37 @@ export function SafetyHeatmap({
       attribution: "&copy; OpenStreetMap contributors",
     }).addTo(map);
 
-    if (points.length === 0) {
-      map.setView(DEFAULT_CENTER, DEFAULT_ZOOM);
-    } else {
-      for (const point of points) {
-        const color = CATEGORY_MAP_COLOR[point.category ?? "other"];
-        const marker = L.circleMarker([point.latitude, point.longitude], {
-          radius: 7,
-          color,
-          weight: 1,
-          fillColor: color,
-          fillOpacity: 0.55,
-        })
-          .bindPopup(
-            point.category
-              ? `Reported incident: ${point.category.replace("_", " ")}`
-              : "Reported incident"
-          )
-          .addTo(map);
-        markersRef.current.set(point.id, marker);
-      }
+    // Always starts centered on Dehradun -- never the all-India/empty-ocean
+    // view, and never refit away from it for just one stray outlier point.
+    map.setView([DEFAULT_CENTER.lat, DEFAULT_CENTER.lng], DEFAULT_ZOOM);
 
+    for (const point of points) {
+      const color = CATEGORY_MAP_COLOR[point.category ?? "other"];
+      const marker = L.circleMarker([point.latitude, point.longitude], {
+        radius: 7,
+        color,
+        weight: 1,
+        fillColor: color,
+        fillOpacity: 0.55,
+      })
+        .bindPopup(
+          point.category
+            ? `Reported incident: ${point.category.replace("_", " ")}`
+            : "Reported incident"
+        )
+        .addTo(map);
+      markersRef.current.set(point.id, marker);
+    }
+
+    // Only refits away from the default Dehradun view once there's a
+    // genuine spread of incidents elsewhere -- a single far-away point
+    // (plausible: one legitimately out-of-town complaint) isn't reason
+    // enough to re-center the whole map away from the city most incidents
+    // are actually in.
+    const outsideCount = points.filter(
+      (p) => !isWithinDehradunViewbox(p.latitude, p.longitude)
+    ).length;
+    if (outsideCount > 1) {
       const bounds = L.latLngBounds(points.map((p) => [p.latitude, p.longitude]));
       map.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 });
     }

@@ -1,4 +1,5 @@
-import { GoogleGenerativeAI, SchemaType, type Schema } from "@google/generative-ai";
+import { SchemaType, type Schema } from "@google/generative-ai";
+import { generateJson } from "@/lib/llm";
 import { CATEGORY_LABEL, type ComplaintCategory, type ExtractedComplaintData } from "@/lib/complaints";
 
 export type SufficiencyContext = {
@@ -66,28 +67,12 @@ function formatContext(context: SufficiencyContext): string {
 export async function checkEvidenceSufficiency(
   context: SufficiencyContext
 ): Promise<string[] | null> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    console.error("[checkEvidenceSufficiency] GEMINI_API_KEY is not set.");
-    return null;
-  }
+  const parsed = await generateJson<string[]>({
+    label: "checkEvidenceSufficiency",
+    system: SYSTEM_INSTRUCTION,
+    prompt: formatContext(context),
+    schema: sufficiencySchema,
+  });
 
-  try {
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({
-      model: "gemini-3.6-flash",
-      systemInstruction: SYSTEM_INSTRUCTION,
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: sufficiencySchema,
-      },
-    });
-
-    const result = await model.generateContent(formatContext(context));
-    const parsed = JSON.parse(result.response.text()) as string[];
-    return parsed;
-  } catch (err) {
-    console.error("[checkEvidenceSufficiency] Gemini call failed:", err);
-    return null;
-  }
+  return Array.isArray(parsed) ? parsed : null;
 }
