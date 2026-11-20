@@ -39,6 +39,7 @@ _tmp_*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # local MCP server config -- may contain personal access tokens (e.g. the
 # Supabase management token); never meant to be shared via the repo
@@ -50,3 +51,7 @@ _tmp_*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local report scratch files
+report-appendix-code.txt
+report-project-facts.txt
